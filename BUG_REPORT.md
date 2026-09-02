@@ -137,7 +137,7 @@ and uses `CMakeConfigDeps` + `CMakeToolchain` in its `generate()`.
 ### Steps to reproduce
 
 ```bash
-cd workspace-issue
+cd conan-workspace-issue
 conan create leaf -s build_type=Release
 conan create wrapper -s build_type=Release
 conan create lic -s build_type=Release
