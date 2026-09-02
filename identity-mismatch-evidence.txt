@@ -1,0 +1,58 @@
+This file captures evidence of the root cause described in BUG_REPORT.md:
+get_transitive_requires() in conan/internal/model/dependencies.py matches
+requirements between a dependency's own direct deps and the workspace-root
+consumer's transitive deps by Python object identity of the underlying
+ConanFileInterface/ConanFile objects, not by package reference.
+
+How this was captured
+----------------------
+A temporary, purely diagnostic (read-only) print statement was added to
+`get_transitive_requires()` in the local Conan installation
+(conan/internal/model/dependencies.py), right after
+`result = result.transitive_requires(pkg_deps)`:
+
+    import os
+    if os.environ.get("CONAN_DEBUG_TRANSITIVE") and \
+       str(getattr(dependency, "ref", "")).startswith(os.environ["CONAN_DEBUG_TRANSITIVE"]):
+        print(f"DEBUG dependency={dependency.ref} "
+              f"pkg_deps={[(str(k), id(v._conanfile)) for k, v in pkg_deps._data.items()]}")
+        print(f"DEBUG consumer_all={[(str(k), id(v._conanfile)) for k, v in consumer.dependencies.filter({'skip': False})._data.items() if 'leaf' in str(k)]}")
+        print(f"DEBUG RESULT={[str(k) for k in result._data.keys()]}")
+
+Then, from this directory, after `conan create leaf/wrapper/lic`:
+
+    CONAN_DEBUG_TRANSITIVE=wrapper conan workspace super-install -s build_type=Release
+
+Captured output
+----------------
+DEBUG get_transitive_requires: dependency=wrapper/1.0 pkg_deps=[('leaf/1.0, Traits: build=False, headers=True, libs=True, run=True, visible=True', 133158486305504)]
+DEBUG get_transitive_requires: consumer_all=[('leaf/1.0, Traits: build=True, headers=False, libs=False, run=True, visible=False', 133158481813072), ('leaf/1.0, Traits: build=False, headers=True, libs=True, run=True, visible=True', 133158481813072)]
+DEBUG get_transitive_requires: RESULT=[]
+DEBUG get_transitive_requires: dependency=wrapper/1.0 pkg_deps=[('leaf/1.0, Traits: build=False, headers=True, libs=True, run=True, visible=True', 133158486305504)]
+DEBUG get_transitive_requires: consumer_all=[('leaf/1.0, Traits: build=True, headers=False, libs=False, run=True, visible=False', 133158481813072), ('leaf/1.0, Traits: build=False, headers=True, libs=True, run=True, visible=True', 133158481813072)]
+DEBUG get_transitive_requires: RESULT=[]
+
+Interpretation
+--------------
+- `wrapper`'s own direct dependency on `leaf` (host context, build=False)
+  points to conanfile object id 133158486305504.
+- The workspace-root consumer's own transitive deps contain TWO entries for
+  `leaf` (one build=True, reached via app's tool_requires("core") -> core's
+  requires("lic") -> lic's requires("leaf") in build context; one
+  build=False, reached the same way in host context). These two are
+  correctly deduplicated to the SAME object, id 133158481813072.
+- However, 133158481813072 != 133158486305504: the object that `wrapper`
+  itself refers to for `leaf` is NOT the same Python object as the one the
+  consumer's (workspace root's) transitive_deps considers canonical for
+  `leaf`, even though both ultimately refer to the exact same
+  leaf/1.0 package/binary.
+- Because ConanFileInterface equality/hash is identity-based, the
+  intersection performed by `transitive_requires()` finds no match, and
+  RESULT is empty - so CMakeConfigDeps never emits an
+  INTERFACE_LINK_LIBRARIES entry pointing `wrapper::wrapper` at `leaf::leaf`.
+
+This exact pattern (dependency's own edge diverging from the consumer's
+canonical, already-internally-deduplicated node for the same package) was
+also observed, with the same debug technique, in the original ~100-package
+project for `cpr` -> `openssl` (`libcpr.a` losing its OpenSSL link), which is
+what originally motivated this investigation.
